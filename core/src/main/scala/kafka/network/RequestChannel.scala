@@ -82,10 +82,9 @@ object RequestChannel extends Logging {
     @volatile var recordNetworkThreadTimeCallback: Option[Long => Unit] = None
 
     val session = Session(context.principal, context.clientAddress)
-    private val bodyAndSize: RequestAndSize = context.parseRequest(buffer)
 
     def header: RequestHeader = context.header
-    def sizeOfBodyInBytes: Int = bodyAndSize.size
+    def sizeOfBodyInBytes: Int = bodyAndSize().sizeInBytes
 
     //most request types are parsed entirely into objects at this point. for those we can release the underlying buffer.
     //some (like produce, or any time the schema contains fields of types BYTES or NULLABLE_BYTES) retain a reference
@@ -94,17 +93,32 @@ object RequestChannel extends Logging {
       releaseBuffer()
     }
 
-    def requestDesc(details: Boolean): String = s"$header -- ${body[AbstractRequest].toString(details)}"
+    def bodyAndSize(): RequestAndSize = context.parseRequest(buffer)
 
-    def body[T <: AbstractRequest](implicit classTag: ClassTag[T], nn: NotNothing[T]): T = {
-      bodyAndSize.request match {
+    val (requestDesc, isFromFollower) = {
+      val requestBodyAndSize = context.parseRequest(buffer)
+      val request = body[AbstractRequest](requestBodyAndSize)
+      val detailedRequestDesc = s"$header -- ${request.toString(true)}"
+
+      request match {
+        case r:FetchRequest => (detailedRequestDesc, r.isFromFollower)
+        case _ => (detailedRequestDesc, false)
+      }
+    }
+
+    def body[T <: AbstractRequest](implicit classTag: ClassTag[T], nn: NotNothing[T]): T =
+      body(context.parseRequest(buffer))
+
+    def body[T <: AbstractRequest](requestAndSize: RequestAndSize)
+                                  (implicit classTag: ClassTag[T], nn: NotNothing[T]): T = {
+      requestAndSize.request match {
         case r: T => r
         case r =>
           throw new ClassCastException(s"Expected request with type ${classTag.runtimeClass}, but found ${r.getClass}")
       }
     }
 
-    trace(s"Processor $processor received request: ${requestDesc(true)}")
+    trace(s"Processor $processor received request: $requestDesc")
 
     def requestThreadTimeNanos = {
       if (apiLocalCompleteTimeNanos == -1L) apiLocalCompleteTimeNanos = Time.SYSTEM.nanoseconds
@@ -144,7 +158,6 @@ object RequestChannel extends Logging {
       val totalTimeMs = nanosToMs(endTimeNanos - startTimeNanos)
       val fetchMetricNames =
         if (header.apiKey == ApiKeys.FETCH) {
-          val isFromFollower = body[FetchRequest].isFromFollower
           Seq(
             if (isFromFollower) RequestMetrics.followFetchMetricName
             else RequestMetrics.consumerFetchMetricName
@@ -176,12 +189,11 @@ object RequestChannel extends Logging {
       recordNetworkThreadTimeCallback.foreach(record => record(networkThreadTimeNanos))
 
       if (isRequestLoggingEnabled) {
-        val detailsEnabled = requestLogger.isTraceEnabled
         val responseString = response.responseAsString.getOrElse(
           throw new IllegalStateException("responseAsString should always be defined if request logging is enabled"))
 
         val builder = new StringBuilder(256)
-        builder.append("Completed request:").append(requestDesc(detailsEnabled))
+        builder.append("Completed request:").append(requestDesc)
           .append(",response:").append(responseString)
           .append(" from connection ").append(context.connectionId)
           .append(";totalTime:").append(totalTimeMs)

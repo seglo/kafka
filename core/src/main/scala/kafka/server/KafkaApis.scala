@@ -17,19 +17,19 @@
 
 package kafka.server
 
-import java.nio.ByteBuffer
 import java.lang.{Long => JLong}
-import java.util.{Collections, Properties}
+import java.nio.ByteBuffer
 import java.util
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.{Collections, Properties}
 
 import kafka.admin.{AdminUtils, RackAwareMode}
 import kafka.api.{ApiVersion, KAFKA_0_11_0_IV0}
 import kafka.cluster.Partition
 import kafka.common.{OffsetAndMetadata, OffsetMetadata}
 import kafka.server.QuotaFactory.{QuotaManagers, UnboundedQuota}
-import kafka.controller.{KafkaController}
+import kafka.controller.KafkaController
 import kafka.coordinator.group.{GroupCoordinator, JoinGroupResult}
 import kafka.coordinator.transaction.{InitProducerIdResult, TransactionCoordinator}
 import kafka.log.{Log, LogManager, TimestampOffset}
@@ -39,27 +39,26 @@ import kafka.security.SecurityUtils
 import kafka.security.auth.{Resource, _}
 import kafka.utils.{CoreUtils, Logging, ZkUtils}
 import kafka.zk.KafkaZkClient
+import org.apache.kafka.common.acl.{AccessControlEntry, AclBinding}
 import org.apache.kafka.common.errors._
 import org.apache.kafka.common.internals.FatalExitError
 import org.apache.kafka.common.internals.Topic.{GROUP_METADATA_TOPIC_NAME, TRANSACTION_STATE_TOPIC_NAME, isInternal}
 import org.apache.kafka.common.metrics.Metrics
 import org.apache.kafka.common.network.ListenerName
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
-import org.apache.kafka.common.record.{ControlRecordType, EndTransactionMarker, MemoryRecords, RecordBatch, RecordsProcessingStats}
+import org.apache.kafka.common.record._
 import org.apache.kafka.common.requests.CreateAclsResponse.AclCreationResponse
 import org.apache.kafka.common.requests.DeleteAclsResponse.{AclDeletionResult, AclFilterResponse}
-import org.apache.kafka.common.requests.{Resource => RResource, ResourceType => RResourceType, _}
+import org.apache.kafka.common.requests.DescribeLogDirsResponse.LogDirInfo
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse
+import org.apache.kafka.common.requests.{SaslAuthenticateResponse, SaslHandshakeResponse, Resource => RResource, ResourceType => RResourceType, _}
+import org.apache.kafka.common.resource.{Resource => AdminResource}
 import org.apache.kafka.common.utils.{Time, Utils}
 import org.apache.kafka.common.{Node, TopicPartition}
-import org.apache.kafka.common.requests.{SaslAuthenticateResponse, SaslHandshakeResponse}
-import org.apache.kafka.common.resource.{Resource => AdminResource}
-import org.apache.kafka.common.acl.{AccessControlEntry, AclBinding}
-import DescribeLogDirsResponse.LogDirInfo
 
-import scala.collection.{mutable, _}
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
+import scala.collection.{mutable, _}
 import scala.util.{Failure, Success, Try}
 
 /**
@@ -95,7 +94,7 @@ class KafkaApis(val requestChannel: RequestChannel,
    */
   def handle(request: RequestChannel.Request) {
     try {
-      trace(s"Handling request:${request.requestDesc(true)} from connection ${request.context.connectionId};" +
+      trace(s"Handling request:${request.requestDesc} from connection ${request.context.connectionId};" +
         s"securityProtocol:${request.context.securityProtocol},principal:${request.context.principal}")
       request.header.apiKey match {
         case ApiKeys.PRODUCE => handleProduceRequest(request)
@@ -364,8 +363,9 @@ class KafkaApis(val requestChannel: RequestChannel,
    * Handle a produce request
    */
   def handleProduceRequest(request: RequestChannel.Request) {
-    val produceRequest = request.body[ProduceRequest]
-    val numBytesAppended = request.header.toStruct.sizeOf + request.sizeOfBodyInBytes
+    val requestBodyAndSize = request.bodyAndSize()
+    val produceRequest = request.body[ProduceRequest](requestBodyAndSize)
+    val numBytesAppended = request.header.toStruct.sizeOf + requestBodyAndSize.sizeInBytes
 
     if (produceRequest.isTransactional) {
       if (!authorize(request.session, Write, new Resource(TransactionalId, produceRequest.transactionalId))) {
@@ -1957,6 +1957,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       new DescribeConfigsResponse(requestThrottleMs, (authorizedConfigs ++ unauthorizedConfigs).asJava))
   }
 
+
   def handleAlterReplicaLogDirsRequest(request: RequestChannel.Request): Unit = {
     val alterReplicaDirsRequest = request.body[AlterReplicaLogDirsRequest]
     val responseMap = {
@@ -2049,10 +2050,11 @@ class KafkaApis(val requestChannel: RequestChannel,
   }
 
   private def sendErrorOrCloseConnection(request: RequestChannel.Request, error: Throwable)(throttleMs: Int): Unit = {
-    val requestBody = request.body[AbstractRequest]
-    val response = requestBody.getErrorResponse(throttleMs, error)
+    val abstractRequest = request.body[AbstractRequest]
+    val response = abstractRequest.getErrorResponse(throttleMs, error)
+
     if (response == null)
-      closeConnection(request, requestBody.errorCounts(error))
+      closeConnection(request, abstractRequest.errorCounts(error))
     else
       sendResponse(request, Some(response))
   }
