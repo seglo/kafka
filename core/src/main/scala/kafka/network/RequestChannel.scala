@@ -84,7 +84,6 @@ object RequestChannel extends Logging {
     val session = Session(context.principal, context.clientAddress)
 
     def header: RequestHeader = context.header
-    def sizeOfBodyInBytes: Int = bodyAndSize().sizeInBytes
 
     //most request types are parsed entirely into objects at this point. for those we can release the underlying buffer.
     //some (like produce, or any time the schema contains fields of types BYTES or NULLABLE_BYTES) retain a reference
@@ -95,14 +94,14 @@ object RequestChannel extends Logging {
 
     def bodyAndSize(): RequestAndSize = context.parseRequest(buffer)
 
-    val (requestDesc, isFromFollower) = {
-      val requestBodyAndSize = context.parseRequest(buffer)
+    val (requestDesc, sizeOfBodyInBytes, isFromFollower): (String, Int, Option[Boolean]) = {
+      val requestBodyAndSize = bodyAndSize()
       val request = body[AbstractRequest](requestBodyAndSize)
       val detailedRequestDesc = s"$header -- ${request.toString(true)}"
 
       request match {
-        case r:FetchRequest => (detailedRequestDesc, r.isFromFollower)
-        case _ => (detailedRequestDesc, false)
+        case r:FetchRequest => (detailedRequestDesc, requestBodyAndSize.sizeInBytes, Some(r.isFromFollower))
+        case _ => (detailedRequestDesc, requestBodyAndSize.sizeInBytes, None)
       }
     }
 
@@ -159,8 +158,10 @@ object RequestChannel extends Logging {
       val fetchMetricNames =
         if (header.apiKey == ApiKeys.FETCH) {
           Seq(
-            if (isFromFollower) RequestMetrics.followFetchMetricName
-            else RequestMetrics.consumerFetchMetricName
+            isFromFollower match {
+              case Some(true) => RequestMetrics.followFetchMetricName
+              case _ => RequestMetrics.consumerFetchMetricName
+            }
           )
         }
         else Seq.empty
