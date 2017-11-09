@@ -95,7 +95,7 @@ class KafkaApis(val requestChannel: RequestChannel,
    */
   def handle(request: RequestChannel.Request) {
     try {
-      trace(s"Handling request:${request.requestDesc(true)} from connection ${request.context.connectionId};" +
+      trace(s"Handling request:${request.requestDesc} from connection ${request.context.connectionId};" +
         s"securityProtocol:${request.context.securityProtocol},principal:${request.context.principal}")
       request.header.apiKey match {
         case ApiKeys.PRODUCE => handleProduceRequest(request)
@@ -364,8 +364,9 @@ class KafkaApis(val requestChannel: RequestChannel,
    * Handle a produce request
    */
   def handleProduceRequest(request: RequestChannel.Request) {
-    val produceRequest = request.body[ProduceRequest]
-    val numBytesAppended = request.header.toStruct.sizeOf + request.sizeOfBodyInBytes
+    val requestBodyAndSize = request.bodyAndSize()
+    val produceRequest = request.body[ProduceRequest](requestBodyAndSize)
+    val numBytesAppended = request.header.toStruct.sizeOf + requestBodyAndSize.sizeInBytes
 
     if (produceRequest.isTransactional) {
       if (!authorize(request.session, Write, new Resource(TransactionalId, produceRequest.transactionalId))) {
@@ -1957,6 +1958,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       new DescribeConfigsResponse(requestThrottleMs, (authorizedConfigs ++ unauthorizedConfigs).asJava))
   }
 
+
   def handleAlterReplicaLogDirsRequest(request: RequestChannel.Request): Unit = {
     val alterReplicaDirsRequest = request.body[AlterReplicaLogDirsRequest]
     val responseMap = {
@@ -2049,10 +2051,11 @@ class KafkaApis(val requestChannel: RequestChannel,
   }
 
   private def sendErrorOrCloseConnection(request: RequestChannel.Request, error: Throwable)(throttleMs: Int): Unit = {
-    val requestBody = request.body[AbstractRequest]
-    val response = requestBody.getErrorResponse(throttleMs, error)
+    val abstractRequest = request.body[AbstractRequest]
+    val response = abstractRequest.getErrorResponse(throttleMs, error)
+
     if (response == null)
-      closeConnection(request, requestBody.errorCounts(error))
+      closeConnection(request, abstractRequest.errorCounts(error))
     else
       sendResponse(request, Some(response))
   }
