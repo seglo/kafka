@@ -28,14 +28,16 @@ import com.yammer.metrics.core.Gauge
 import kafka.cluster.{BrokerEndPoint, EndPoint}
 import kafka.common.KafkaException
 import kafka.metrics.KafkaMetricsGroup
+import kafka.network
+import kafka.network.RequestChannel.RequestBody
 import kafka.security.CredentialProvider
 import kafka.server.KafkaConfig
 import kafka.utils._
 import org.apache.kafka.common.memory.{MemoryPool, SimpleMemoryPool}
 import org.apache.kafka.common.metrics._
 import org.apache.kafka.common.metrics.stats.Meter
-import org.apache.kafka.common.network.{ChannelBuilder, ChannelBuilders, KafkaChannel, ListenerName, Selectable, Send, Selector => KSelector}
-import org.apache.kafka.common.requests.{RequestContext, RequestHeader}
+import org.apache.kafka.common.network.{ChannelBuilder, ChannelBuilders, KafkaChannel, ListenerName, NetworkReceive, Selectable, Send, Selector => KSelector}
+import org.apache.kafka.common.requests._
 import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.utils.{KafkaThread, LogContext, Time}
 
@@ -549,9 +551,12 @@ private[kafka] class Processor(val id: Int,
             val header = RequestHeader.parse(receive.payload)
             val context = new RequestContext(header, receive.source, channel.socketAddress,
               channel.principal, listenerName, securityProtocol)
-            val req = new RequestChannel.Request(processor = id, context = context,
-              startTimeNanos = time.nanoseconds, memoryPool, receive.payload, requestChannel.metrics)
-            requestChannel.sendRequest(req)
+            val (reqBody, req) = requestAndBody(context, receive)
+            val channelReq = new RequestChannel.Request(processor = id, context = context,
+              startTimeNanos = time.nanoseconds, memoryPool, receive.payload, requestChannel.metrics, reqBody)
+            val parsedReq = RequestChannel.RequestAndBody(req, channelReq)
+
+            requestChannel.sendRequest(parsedReq)
             selector.mute(receive.source)
           case None =>
             // This should never happen since completed receives are processed immediately after `poll()`
@@ -564,6 +569,22 @@ private[kafka] class Processor(val id: Int,
           processChannelException(receive.source, s"Exception while processing request from ${receive.source}", e)
       }
     }
+  }
+
+  private def requestAndBody(context: RequestContext, receive: NetworkReceive): (RequestChannel.RequestBody, AbstractRequest) = {
+    val requestBodyAndSize = context.parseRequest(receive.payload)
+    val parsedRequest = requestBodyAndSize.request
+    val requestBody = RequestBody(
+      description = s"${context.header} -- ${parsedRequest.toString(false)}",
+      detailedDescription = s"${context.header} -- ${parsedRequest.toString(true)}",
+      sizeInBytes = requestBodyAndSize.sizeInBytes,
+      isFromFollower = parsedRequest match {
+        case r:FetchRequest => Some(r.isFromFollower)
+        case _ => None
+      }
+    )
+
+    (requestBody, parsedRequest)
   }
 
   private def processCompletedSends() {

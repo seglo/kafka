@@ -58,18 +58,18 @@ class KafkaRequestHandler(id: Int,
           latch.countDown()
           return
 
-        case request: RequestChannel.Request =>
+        case reqAndBody @ RequestChannel.RequestAndBody(_, channelRequest) =>
           try {
-            request.requestDequeueTimeNanos = endTime
-            trace(s"Kafka request handler $id on broker $brokerId handling request $request")
-            apis.handle(request)
+            channelRequest.requestDequeueTimeNanos = endTime
+            trace(s"Kafka request handler $id on broker $brokerId handling request $channelRequest")
+            apis.handle(reqAndBody)
           } catch {
             case e: FatalExitError =>
               latch.countDown()
               Exit.exit(e.statusCode)
             case e: Throwable => error("Exception when handling request", e)
           } finally {
-              request.releaseBuffer()
+            channelRequest.releaseBuffer()
           }
 
         case null => // continue

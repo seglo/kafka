@@ -28,6 +28,7 @@ import kafka.coordinator.group.GroupCoordinator
 import kafka.coordinator.transaction.TransactionCoordinator
 import kafka.log.{Log, TimestampOffset}
 import kafka.network.RequestChannel
+import kafka.network.RequestChannel.{RequestAndBody, RequestBody}
 import kafka.security.auth.Authorizer
 import kafka.server.QuotaFactory.QuotaManagers
 import kafka.utils.{MockTime, TestUtils, ZkUtils}
@@ -396,7 +397,7 @@ class KafkaApisTest {
     buildRequest(requestBuilder)
   }
 
-  private def buildRequest[T <: AbstractRequest](builder: AbstractRequest.Builder[T]): (T, RequestChannel.Request) = {
+  private def buildRequest[T <: AbstractRequest](builder: AbstractRequest.Builder[T]): (T, RequestChannel.RequestAndBody) = {
     val request = builder.build()
     val buffer = request.serialize(new RequestHeader(builder.apiKey, request.version, "", 0))
 
@@ -404,8 +405,19 @@ class KafkaApisTest {
     val header = RequestHeader.parse(buffer)
     val context = new RequestContext(header, "1", InetAddress.getLocalHost, KafkaPrincipal.ANONYMOUS,
       new ListenerName(""), SecurityProtocol.PLAINTEXT)
-    (request, new RequestChannel.Request(processor = 1, context = context, startTimeNanos =  0,
-      MemoryPool.NONE, buffer, requestChannelMetrics))
+    val requestBodyAndSize = context.parseRequest(buffer)
+    val requestBody = RequestBody(
+      description = s"${context.header} -- ${request.toString(false)}",
+      detailedDescription = s"${context.header} -- ${request.toString(true)}",
+      sizeInBytes = requestBodyAndSize.sizeInBytes,
+      isFromFollower = request match {
+        case r:FetchRequest => Some(r.isFromFollower)
+        case _ => None
+      }
+    )
+    val channelRequest = new RequestChannel.Request(processor = 1, context = context, startTimeNanos =  0,
+      MemoryPool.NONE, buffer, requestChannelMetrics, requestBody)
+    (request, RequestAndBody(request, channelRequest))
   }
 
   private def readResponse(api: ApiKeys, request: AbstractRequest, capturedResponse: Capture[RequestChannel.Response]): AbstractResponse = {

@@ -93,9 +93,10 @@ class SocketServerTest extends JUnitSuite {
     response
   }
 
-  private def receiveRequest(channel: RequestChannel, timeout: Long = 2000L): RequestChannel.Request = {
+  private def receiveRequest(channel: RequestChannel, timeout: Long = 2000L): RequestChannel.RequestAndBody = {
     channel.receiveRequest(timeout) match {
-      case request: RequestChannel.Request => request
+      case requestAndBody: RequestChannel.RequestAndBody => requestAndBody
+      case RequestChannel.Regiquest => fail("Unexpected channel request received")
       case RequestChannel.ShutdownRequest => fail("Unexpected shutdown received")
       case null => fail("receiveRequest timed out")
     }
@@ -106,8 +107,9 @@ class SocketServerTest extends JUnitSuite {
     processRequest(channel, receiveRequest(channel))
   }
 
-  def processRequest(channel: RequestChannel, request: RequestChannel.Request) {
-    val byteBuffer = request.body[AbstractRequest].serialize(request.header)
+  def processRequest(channel: RequestChannel, requestAndBody: RequestChannel.RequestAndBody) {
+    val request = requestAndBody.channelRequest
+    val byteBuffer = requestAndBody.body[AbstractRequest].serialize(request.header)
     byteBuffer.rewind()
 
     val send = new NetworkSend(request.context.connectionId, byteBuffer)
@@ -128,7 +130,7 @@ class SocketServerTest extends JUnitSuite {
     (socket, request.context.connectionId)
   }
 
-  def sendAndReceiveRequest(socket: Socket, server: SocketServer): RequestChannel.Request = {
+  def sendAndReceiveRequest(socket: Socket, server: SocketServer): RequestChannel.RequestAndBody = {
     sendRequest(socket, producerRequestBytes)
     receiveRequest(server.requestChannel)
   }

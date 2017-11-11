@@ -43,6 +43,24 @@ object RequestChannel extends Logging {
 
   sealed trait BaseRequest
   case object ShutdownRequest extends BaseRequest
+  case class RequestAndBody(request: AbstractRequest, channelRequest: RequestChannel.Request) extends BaseRequest {
+    def body[T <: AbstractRequest](implicit classTag: ClassTag[T], nn: NotNothing[T]): T = {
+      request match {
+        case r: T => r
+        case r =>
+          throw new ClassCastException(s"Expected request with type ${classTag.runtimeClass}, but found ${r.getClass}")
+      }
+    }
+  }
+
+  case class RequestBody(
+                             description: String,
+                             detailedDescription: String,
+                             sizeInBytes: Int,
+                             isFromFollower: Option[Boolean]
+                        ) {
+    def getDescription(details: Boolean): String = if (details) detailedDescription else description
+  }
 
   case class Session(principal: KafkaPrincipal, clientAddress: InetAddress) {
     val sanitizedUser = Sanitizer.sanitize(principal.getName)
@@ -69,7 +87,9 @@ object RequestChannel extends Logging {
                 val startTimeNanos: Long,
                 memoryPool: MemoryPool,
                 @volatile private var buffer: ByteBuffer,
-                metrics: RequestChannel.Metrics) extends BaseRequest {
+                metrics: RequestChannel.Metrics,
+                val body: RequestChannel.RequestBody
+               ) extends BaseRequest {
     // These need to be volatile because the readers are in the network thread and the writers are in the request
     // handler threads or the purgatory threads
     @volatile var requestDequeueTimeNanos = -1L
@@ -92,32 +112,7 @@ object RequestChannel extends Logging {
       releaseBuffer()
     }
 
-    def bodyAndSize(): RequestAndSize = context.parseRequest(buffer)
-
-    val (requestDesc, sizeOfBodyInBytes, isFromFollower): (String, Int, Option[Boolean]) = {
-      val requestBodyAndSize = bodyAndSize()
-      val request = body[AbstractRequest](requestBodyAndSize)
-      val detailedRequestDesc = s"$header -- ${request.toString(true)}"
-
-      request match {
-        case r:FetchRequest => (detailedRequestDesc, requestBodyAndSize.sizeInBytes, Some(r.isFromFollower))
-        case _ => (detailedRequestDesc, requestBodyAndSize.sizeInBytes, None)
-      }
-    }
-
-    def body[T <: AbstractRequest](implicit classTag: ClassTag[T], nn: NotNothing[T]): T =
-      body(context.parseRequest(buffer))
-
-    def body[T <: AbstractRequest](requestAndSize: RequestAndSize)
-                                  (implicit classTag: ClassTag[T], nn: NotNothing[T]): T = {
-      requestAndSize.request match {
-        case r: T => r
-        case r =>
-          throw new ClassCastException(s"Expected request with type ${classTag.runtimeClass}, but found ${r.getClass}")
-      }
-    }
-
-    trace(s"Processor $processor received request: $requestDesc")
+    trace(s"Processor $processor received request: ${body.detailedDescription}")
 
     def requestThreadTimeNanos = {
       if (apiLocalCompleteTimeNanos == -1L) apiLocalCompleteTimeNanos = Time.SYSTEM.nanoseconds
@@ -158,7 +153,7 @@ object RequestChannel extends Logging {
       val fetchMetricNames =
         if (header.apiKey == ApiKeys.FETCH) {
           Seq(
-            isFromFollower match {
+            body.isFromFollower match {
               case Some(true) => RequestMetrics.followFetchMetricName
               case _ => RequestMetrics.consumerFetchMetricName
             }
@@ -176,7 +171,7 @@ object RequestChannel extends Logging {
         m.responseQueueTimeHist.update(Math.round(responseQueueTimeMs))
         m.responseSendTimeHist.update(Math.round(responseSendTimeMs))
         m.totalTimeHist.update(Math.round(totalTimeMs))
-        m.requestBytesHist.update(sizeOfBodyInBytes)
+        m.requestBytesHist.update(body.sizeInBytes)
         m.messageConversionsTimeHist.foreach(_.update(Math.round(messageConversionsTimeMs)))
         m.tempMemoryBytesHist.foreach(_.update(temporaryMemoryBytes))
       }
@@ -190,6 +185,8 @@ object RequestChannel extends Logging {
       recordNetworkThreadTimeCallback.foreach(record => record(networkThreadTimeNanos))
 
       if (isRequestLoggingEnabled) {
+        val detailsEnabled = requestLogger.isTraceEnabled
+        val requestDesc = body.getDescription(detailsEnabled)
         val responseString = response.responseAsString.getOrElse(
           throw new IllegalStateException("responseAsString should always be defined if request logging is enabled"))
 
@@ -278,7 +275,7 @@ class RequestChannel(val numProcessors: Int, val queueSize: Int) extends KafkaMe
   }
 
   /** Send a request to be handled, potentially blocking until there is room in the queue for the request */
-  def sendRequest(request: RequestChannel.Request) {
+  def sendRequest(request: RequestChannel.RequestAndBody) {
     requestQueue.put(request)
   }
 
