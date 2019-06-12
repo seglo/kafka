@@ -79,6 +79,7 @@ import org.slf4j.helpers.MessageFormatter;
 
 import java.io.Closeable;
 import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -91,6 +92,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.PriorityQueue;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -575,13 +577,33 @@ public class Fetcher<K, V> implements Closeable {
      */
     public Map<TopicPartition, List<ConsumerRecord<K, V>>> fetchedRecords() {
         Map<TopicPartition, List<ConsumerRecord<K, V>>> fetched = new HashMap<>();
+        Queue<CompletedFetch> pausedCompletedFetches = new ArrayDeque<>();
         int recordsRemaining = maxPollRecords;
 
         try {
             while (recordsRemaining > 0) {
                 if (nextInLineRecords == null || nextInLineRecords.isFetched) {
                     CompletedFetch completedFetch = completedFetches.peek();
+
                     if (completedFetch == null) break;
+
+                    Boolean paused;
+                    do {
+                        // if the completedFetch belongs to a paused partition then skip parsing it so we don't throw away
+                        // data that's already been fetched.
+                        paused = subscriptions.isPaused(completedFetch.partition);
+                        if (paused) {
+                            log.debug("Skipping fetched records for assigned partition {} since it is paused",
+                                    completedFetch.partition);
+                            // Add the paused completedFetch to our temp queue so it's not checked again in this call
+                            pausedCompletedFetches.add(completedFetches.poll());
+                            completedFetch = completedFetches.peek();
+                        } else {
+                            break;
+                        }
+                    } while (completedFetch != null);
+
+                    if (completedFetch == null || paused) break;
 
                     try {
                         nextInLineRecords = parseCompletedFetch(completedFetch);
@@ -621,7 +643,11 @@ public class Fetcher<K, V> implements Closeable {
         } catch (KafkaException e) {
             if (fetched.isEmpty())
                 throw e;
+        } finally {
+            // add back any paused partitions back to completed fetches
+            completedFetches.addAll(pausedCompletedFetches);
         }
+
         return fetched;
     }
 
@@ -635,6 +661,10 @@ public class Fetcher<K, V> implements Closeable {
             // poll call or if the offset is being reset
             log.debug("Not returning fetched records for assigned partition {} since it is no longer fetchable",
                     partitionRecords.partition);
+            // FOR DEBUG ONLY:
+            if (subscriptions.isPaused(partitionRecords.partition)) {
+                log.debug("Partition is paused {}", partitionRecords.partition);
+            }
         } else {
             SubscriptionState.FetchPosition position = subscriptions.position(partitionRecords.partition);
             if (partitionRecords.nextFetchOffset == position.offset) {
