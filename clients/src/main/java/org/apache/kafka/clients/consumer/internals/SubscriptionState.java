@@ -632,10 +632,12 @@ public class SubscriptionState {
     }
 
     public synchronized void pause(TopicPartition tp) {
+        log.debug("### Pausing partition {}", tp);
         assignedState(tp).pause();
     }
 
     public synchronized void resume(TopicPartition tp) {
+        log.debug("### Resuming partition {}", tp);
         assignedState(tp).resume();
     }
 
