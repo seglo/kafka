@@ -1259,11 +1259,8 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
         long pollTimeout = coordinator == null ? timer.remainingMs() :
                 Math.min(coordinator.timeToNextPoll(timer.currentTimeMs()), timer.remainingMs());
 
-        java.util.UUID uuid = java.util.UUID.randomUUID();
         // if data is available already, return it immediately
-        log.debug("### Begin call 1 to fetchedRecords {}", uuid);
-        Map<TopicPartition, List<ConsumerRecord<K, V>>> records = fetcher.fetchedRecords();
-        log.debug("### Completed call 1 to fetchedRecords {}", uuid);
+        final Map<TopicPartition, List<ConsumerRecord<K, V>>> records = fetcher.fetchedRecords();
         if (!records.isEmpty()) {
             return records;
         }
@@ -1294,10 +1291,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
             return Collections.emptyMap();
         }
 
-        log.debug("### Begin call 2 (long poll) to fetchedRecords {}", uuid);
-        records = fetcher.fetchedRecords();
-        log.debug("### Completed call 2 (long poll) to fetchedRecords {}", uuid);
-        return records;
+        return fetcher.fetchedRecords();
     }
 
     /**
