@@ -39,6 +39,7 @@ public class FetcherMetricsRegistry {
     public MetricNameTemplate fetchRequestTotal;
     public MetricNameTemplate recordsLagMax;
     public MetricNameTemplate recordsLeadMin;
+    public MetricNameTemplate recordsLatencyMax;
     public MetricNameTemplate fetchThrottleTimeAvg;
     public MetricNameTemplate fetchThrottleTimeMax;
     public MetricNameTemplate topicFetchSizeAvg;
@@ -54,6 +55,9 @@ public class FetcherMetricsRegistry {
     public MetricNameTemplate partitionRecordsLead;
     public MetricNameTemplate partitionRecordsLeadMin;
     public MetricNameTemplate partitionRecordsLeadAvg;
+    public MetricNameTemplate partitionRecordsLatency;
+    public MetricNameTemplate partitionRecordsLatencyMax;
+    public MetricNameTemplate partitionRecordsLatencyAvg;
 
     public FetcherMetricsRegistry() {
         this(new HashSet<String>(), "");
@@ -98,7 +102,8 @@ public class FetcherMetricsRegistry {
                 "The maximum lag in terms of number of records for any partition in this window", tags);
         this.recordsLeadMin = new MetricNameTemplate("records-lead-min", groupName,
                 "The minimum lead in terms of number of records for any partition in this window", tags);
-
+        this.recordsLatencyMax = new MetricNameTemplate("records-latency-max", groupName,
+                "The maximum latency in terms of number of records for any partition in this window", tags);
         this.fetchThrottleTimeAvg = new MetricNameTemplate("fetch-throttle-time-avg", groupName,
                 "The average throttle time in ms", tags);
         this.fetchThrottleTimeMax = new MetricNameTemplate("fetch-throttle-time-max", groupName,
@@ -139,7 +144,12 @@ public class FetcherMetricsRegistry {
                 "The min lead of the partition", partitionTags);
         this.partitionRecordsLeadAvg = new MetricNameTemplate("records-lead-avg", groupName,
                 "The average lead of the partition", partitionTags);
-
+        this.partitionRecordsLatency = new MetricNameTemplate("records-latency", groupName,
+                "The latest latency of the partition", partitionTags);
+        this.partitionRecordsLatencyMax = new MetricNameTemplate("records-latency-max", groupName,
+                "The max latency of the partition", partitionTags);
+        this.partitionRecordsLatencyAvg = new MetricNameTemplate("records-latency-avg", groupName,
+                "The average latency of the partition", partitionTags);
     }
 
     public List<MetricNameTemplate> getAllTemplates() {
@@ -157,6 +167,7 @@ public class FetcherMetricsRegistry {
             fetchRequestTotal,
             recordsLagMax,
             recordsLeadMin,
+            recordsLatencyMax,
             fetchThrottleTimeAvg,
             fetchThrottleTimeMax,
             topicFetchSizeAvg,
@@ -171,7 +182,10 @@ public class FetcherMetricsRegistry {
             partitionRecordsLagMax,
             partitionRecordsLead,
             partitionRecordsLeadMin,
-            partitionRecordsLeadAvg
+            partitionRecordsLeadAvg,
+            partitionRecordsLatency,
+            partitionRecordsLatencyAvg,
+            partitionRecordsLatencyMax
         );
     }
 

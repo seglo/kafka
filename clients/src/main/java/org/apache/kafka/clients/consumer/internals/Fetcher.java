@@ -659,6 +659,11 @@ public class Fetcher<K, V> implements Closeable {
                     this.sensors.recordPartitionLead(partitionRecords.partition, lead);
                 }
 
+                if (partRecords.size() > 0) {
+                    ConsumerRecord<K, V> lastRecord = partRecords.get(partRecords.size() - 1);
+                    this.sensors.recordPartitionLatency(partitionRecords.partition, lastRecord.timestamp());
+                }
+
                 return partRecords;
             } else {
                 // these records aren't next in line based on the last consumed position, ignore them
@@ -1633,6 +1638,7 @@ public class Fetcher<K, V> implements Closeable {
         private final Sensor fetchLatency;
         private final Sensor recordsFetchLag;
         private final Sensor recordsFetchLead;
+        private final Sensor recordsFetchLatency;
 
         private int assignmentId = 0;
         private Set<TopicPartition> assignedPartitions = Collections.emptySet();
@@ -1663,6 +1669,9 @@ public class Fetcher<K, V> implements Closeable {
 
             this.recordsFetchLead = metrics.sensor("records-lead");
             this.recordsFetchLead.add(metrics.metricInstance(metricsRegistry.recordsLeadMin), new Min());
+
+            this.recordsFetchLatency = metrics.sensor("records-latency");
+            this.recordsFetchLatency.add(metrics.metricInstance(metricsRegistry.recordsLatencyMax), new Max());
         }
 
         private void recordTopicFetchMetrics(String topic, int bytes, int records) {
@@ -1751,12 +1760,39 @@ public class Fetcher<K, V> implements Closeable {
             recordsLag.record(lag);
         }
 
+        private void recordPartitionLatency(TopicPartition tp, long timestamp) {
+            long latency = System.currentTimeMillis() - timestamp;
+
+            if (latency < 0) return;
+
+            this.recordsFetchLatency.record(latency);
+
+            String name = partitionLatencyMetricName(tp);
+            Sensor recordsLatency = this.metrics.getSensor(name);
+            if (recordsLatency == null) {
+                Map<String, String> metricTags = new HashMap<>(2);
+                metricTags.put("topic", tp.topic().replace('.', '_'));
+                metricTags.put("partition", String.valueOf(tp.partition()));
+
+                recordsLatency = this.metrics.sensor(name);
+
+                recordsLatency.add(this.metrics.metricInstance(metricsRegistry.partitionRecordsLatency, metricTags), new Value());
+                recordsLatency.add(this.metrics.metricInstance(metricsRegistry.partitionRecordsLatencyMax, metricTags), new Max());
+                recordsLatency.add(this.metrics.metricInstance(metricsRegistry.partitionRecordsLatencyAvg, metricTags), new Avg());
+            }
+            recordsLatency.record(latency);
+        }
+
         private static String partitionLagMetricName(TopicPartition tp) {
             return tp + ".records-lag";
         }
 
         private static String partitionLeadMetricName(TopicPartition tp) {
             return tp + ".records-lead";
+        }
+
+        private static String partitionLatencyMetricName(TopicPartition tp) {
+            return tp + ".records-latency";
         }
 
     }
