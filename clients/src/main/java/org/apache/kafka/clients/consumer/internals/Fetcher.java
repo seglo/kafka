@@ -190,7 +190,6 @@ public class Fetcher<K, V> implements Closeable {
         this.keyDeserializer = keyDeserializer;
         this.valueDeserializer = valueDeserializer;
         this.completedFetches = new ConcurrentLinkedQueue<>();
-        //this.parsedFetchesCache = new ConcurrentLinkedQueue<>();
         this.sensors = new FetchManagerMetrics(metrics, metricsRegistry);
         this.retryBackoffMs = retryBackoffMs;
         this.requestTimeoutMs = requestTimeoutMs;
@@ -292,26 +291,11 @@ public class Fetcher<K, V> implements Closeable {
 
                                             log.debug("Fetch {} at offset {} for partition {} returned fetch data {}",
                                                     isolationLevel, fetchOffset, partition, fetchData);
-                                            // TODO: Do we even need `CompletedFetch` if we create a `PartitionRecords` right away?
+
                                             CompletedFetch completedFetch = new CompletedFetch(partition, fetchOffset,
                                                     fetchData, metricAggregator, resp.requestHeader().apiVersion());
 
-                                            // TODO: Exception handling serves no purpose if we can't "cache" a `CompletedFetch` anywhere
-//                                            try {
-                                            PartitionRecords records = parseCompletedFetch(completedFetch);
-                                            if (records != null)
-                                                completedFetches.add(records);
-//                                            } catch (Exception e) {
-//                                                // Remove a completedFetch upon a parse with exception if it contains no records
-//                                                // This ensures that the completedFetches is not stuck with the same completedFetch
-//                                                // in cases such as the TopicAuthorizationException
-//                                                FetchResponse.PartitionData partitionData = completedFetch.partitionData;
-//                                                if (partitionData.records == null || partitionData.records.sizeInBytes() == 0) {
-//                                                    completedFetches.poll();
-//                                                }
-//                                                throw e;
-//                                            }
-
+                                            completedFetches.add(parseCompletedFetch(completedFetch));
                                         }
                                     }
 
@@ -601,9 +585,29 @@ public class Fetcher<K, V> implements Closeable {
         try {
             while (recordsRemaining > 0) {
                 if (nextInLineRecords == null || nextInLineRecords.isFetched) {
-                    nextInLineRecords = maybeGetPartitionRecords();
+                    PartitionRecords records = maybeGetPartitionRecords();
 
-                    if (nextInLineRecords == null) break;
+                    if (records == null) break;
+
+                    if (records.notInitialized()) {
+                        try {
+                            nextInLineRecords = initializePartitionRecords(records);
+                        } catch (Exception e) {
+                            // Remove a completedFetch upon a parse with exception if (1) it contains no records, and
+                            // (2) there are no fetched records with actual content preceding this exception.
+                            // The first condition ensures that the completedFetches is not stuck with the same completedFetch
+                            // in cases such as the TopicAuthorizationException, and the second condition ensures that no
+                            // potential data loss due to an exception in a following record.
+                            FetchResponse.PartitionData partition = records.completedFetch.partitionData;
+                            if (fetched.isEmpty() && (partition.records == null || partition.records.sizeInBytes() == 0)) {
+                                completedFetches.remove(records);
+                            }
+                            throw e;
+                        }
+                    } else {
+                        nextInLineRecords = records;
+                    }
+                    completedFetches.remove(records);
                 } else {
                     List<ConsumerRecord<K, V>> records = fetchRecords(nextInLineRecords, recordsRemaining);
 
@@ -635,13 +639,11 @@ public class Fetcher<K, V> implements Closeable {
 
     private PartitionRecords maybeGetPartitionRecords() {
         PartitionRecords partRecords = null;
-        for (Iterator<PartitionRecords> it = completedFetches.iterator(); it.hasNext(); ) {
-            PartitionRecords records = it.next();
+        for (PartitionRecords records : completedFetches) {
             if (subscriptions.isPaused(records.partition)) {
                 log.debug("Skipping the completed fetch for partition {} because its partition is paused", records.partition);
             } else {
                 partRecords = records;
-                it.remove();
                 break;
             }
         }
@@ -1157,9 +1159,21 @@ public class Fetcher<K, V> implements Closeable {
     }
 
     /**
-     * The callback for fetch completion
+     * Parse a PartitionRecords object from a CompletedFetch
      */
     private PartitionRecords parseCompletedFetch(CompletedFetch completedFetch) {
+        TopicPartition tp = completedFetch.partition;
+        FetchResponse.PartitionData<Records> partition = completedFetch.partitionData;
+
+        Iterator<? extends RecordBatch> batches = partition.records.batches().iterator();
+        return new PartitionRecords(tp, completedFetch, batches);
+    }
+
+    /**
+     * Initialize a PartitionRecords object.
+     */
+    private PartitionRecords initializePartitionRecords(PartitionRecords partitionRecordsToInitialize) {
+        CompletedFetch completedFetch = partitionRecordsToInitialize.completedFetch;
         TopicPartition tp = completedFetch.partition;
         FetchResponse.PartitionData<Records> partition = completedFetch.partitionData;
         long fetchOffset = completedFetch.fetchedOffset;
@@ -1183,7 +1197,7 @@ public class Fetcher<K, V> implements Closeable {
                 log.trace("Preparing to read {} bytes of data for partition {} with offset {}",
                         partition.records.sizeInBytes(), tp, position);
                 Iterator<? extends RecordBatch> batches = partition.records.batches().iterator();
-                partitionRecords = new PartitionRecords(tp, completedFetch, batches);
+                partitionRecords = partitionRecordsToInitialize;
 
                 if (!batches.hasNext() && partition.records.sizeInBytes() > 0) {
                     if (completedFetch.responseVersion < 3) {
@@ -1227,6 +1241,8 @@ public class Fetcher<K, V> implements Closeable {
                     });
                 }
 
+
+                partitionRecordsToInitialize.initialized = true;
             } else if (error == Errors.NOT_LEADER_FOR_PARTITION ||
                        error == Errors.REPLICA_NOT_AVAILABLE ||
                        error == Errors.KAFKA_STORAGE_ERROR ||
@@ -1379,6 +1395,7 @@ public class Fetcher<K, V> implements Closeable {
         private boolean isFetched = false;
         private Exception cachedRecordException = null;
         private boolean corruptLastRecord = false;
+        private boolean initialized = false;
 
         private PartitionRecords(TopicPartition partition,
                                  CompletedFetch completedFetch,
@@ -1579,6 +1596,10 @@ public class Fetcher<K, V> implements Closeable {
 
             Record firstRecord = batchIterator.next();
             return ControlRecordType.ABORT == ControlRecordType.parse(firstRecord.key());
+        }
+
+        private boolean notInitialized() {
+            return !this.initialized;
         }
     }
 
