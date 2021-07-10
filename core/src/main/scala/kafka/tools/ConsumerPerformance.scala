@@ -21,7 +21,7 @@ import java.text.SimpleDateFormat
 import java.time.Duration
 import java.util
 import java.util.concurrent.atomic.AtomicLong
-import java.util.{Properties, Random}
+import java.util.Properties
 
 import com.typesafe.scalalogging.LazyLogging
 import kafka.utils.{CommandLineUtils, ToolsUtils}
@@ -29,9 +29,12 @@ import org.apache.kafka.clients.consumer.{ConsumerRebalanceListener, KafkaConsum
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
 import org.apache.kafka.common.utils.Utils
 import org.apache.kafka.common.{Metric, MetricName, TopicPartition}
+import joptsimple.util.RegexMatcher._
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
+import scala.collection.mutable.ListBuffer
+import scala.util.Random
 
 /**
  * Performance test for the full zookeeper consumer
@@ -107,15 +110,30 @@ object ConsumerPerformance extends LazyLogging {
     var lastMessagesRead = 0L
     var joinStart = 0L
     var joinTimeMsInSingleRound = 0L
+    val assignedPartitions = ListBuffer[TopicPartition]()
+    var pausedPartitions = List[TopicPartition]()
 
     consumer.subscribe(topics.asJava, new ConsumerRebalanceListener {
       def onPartitionsAssigned(partitions: util.Collection[TopicPartition]): Unit = {
         joinTime.addAndGet(System.currentTimeMillis - joinStart)
         joinTimeMsInSingleRound += System.currentTimeMillis - joinStart
+        assignedPartitions ++= partitions.asScala
       }
       def onPartitionsRevoked(partitions: util.Collection[TopicPartition]): Unit = {
         joinStart = System.currentTimeMillis
+        assignedPartitions --= partitions.asScala
       }})
+
+    def pausePartitions(): Unit = {
+      val assignmentSize = assignedPartitions.length
+      val numPartitionsToPause = Math.ceil(assignmentSize * config.pausedPartitionsPercent).toInt
+      pausedPartitions = (0 until numPartitionsToPause)
+        .map(_ => assignedPartitions(scala.util.Random.nextInt(assignmentSize)))
+        .toList
+      consumer.pause(pausedPartitions.asJava)
+    }
+
+    def resumePartitions(): Unit = consumer.resume(pausedPartitions.asJava)
 
     // Now start the benchmark
     var currentTimeMillis = System.currentTimeMillis
@@ -123,8 +141,10 @@ object ConsumerPerformance extends LazyLogging {
     var lastConsumedTime = currentTimeMillis
 
     while (messagesRead < count && currentTimeMillis - lastConsumedTime <= timeout) {
+      if (config.pausedPartitionsPercent > 0) pausePartitions()
       val records = consumer.poll(Duration.ofMillis(100)).asScala
       currentTimeMillis = System.currentTimeMillis
+      if (config.pausedPartitionsPercent > 0) resumePartitions()
       if (records.nonEmpty)
         lastConsumedTime = currentTimeMillis
       for (record <- records) {
@@ -213,7 +233,7 @@ object ConsumerPerformance extends LazyLogging {
     val groupIdOpt = parser.accepts("group", "The group id to consume on.")
       .withRequiredArg
       .describedAs("gid")
-      .defaultsTo("perf-consumer-" + new Random().nextInt(100000))
+      .defaultsTo("perf-consumer-" + Random.nextInt(100000))
       .ofType(classOf[String])
     val fetchSizeOpt = parser.accepts("fetch-size", "The amount of data to fetch in a single request.")
       .withRequiredArg
@@ -249,6 +269,13 @@ object ConsumerPerformance extends LazyLogging {
       .describedAs("milliseconds")
       .ofType(classOf[Long])
       .defaultsTo(10000)
+    val pausedPartitionsOpt = parser.accepts("paused-partitions-percent", "The percentage [0-1] of subscribed " +
+      "partitions to pause each poll.")
+        .withOptionalArg()
+        .describedAs("percent")
+        .withValuesConvertedBy(regex("^0(\\.\\d+)?|1\\.0$")) // matches [0-1] with decimals
+        .ofType(classOf[Float])
+        .defaultsTo(0F)
 
     options = parser.parse(args: _*)
 
@@ -283,5 +310,6 @@ object ConsumerPerformance extends LazyLogging {
     val dateFormat = new SimpleDateFormat(options.valueOf(dateFormatOpt))
     val hideHeader = options.has(hideHeaderOpt)
     val recordFetchTimeoutMs = options.valueOf(recordFetchTimeoutOpt).longValue()
+    val pausedPartitionsPercent = options.valueOf(pausedPartitionsOpt).floatValue()
   }
 }
